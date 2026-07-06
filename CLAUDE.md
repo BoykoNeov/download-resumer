@@ -178,6 +178,21 @@ sequences don't clobber each other via read-modify-write races.
 - Per-row button is contextual: running rows show **Cancel** (stop icon),
   stopped rows show **Clear** (trash icon). Clearing also purges that id's
   `eventLog` / `retryState` entries.
+- **Managed download box** (`#newUrl` / `#startDownload`, above the list): paste
+  a URL and it calls `chrome.downloads.download({ url })` directly — filename
+  is left unset so it keeps whatever name the server provides. Lives outside
+  `#list`, so the 1s re-render never touches it.
+- **Restart with new URL**: any `interrupted` row's detail panel gets a
+  `.restart-input` + Restart button (`renderRestart`). Since Chrome's own
+  `resume()` can't be redirected to a different URL and keep the partial file
+  (see the DNR gotcha below), this is a full re-download under the new URL via
+  `startDownload()`, followed by erasing the old dead entry
+  (`restartWithNewUrl`) — a restart, not a resume.
+- Because `.restart-input` lives inside `#list`, the 1s re-render would wipe
+  focus and whatever the user just typed mid-keystroke — `renderList()` bails
+  out for the tick entirely while `document.activeElement` is a
+  `.restart-input`, at the cost of every other row's progress freezing for
+  those few seconds.
 
 The popup list only shows: everything `in_progress` or `interrupted`, plus
 `complete` items finished in the last 2 minutes.
@@ -197,6 +212,15 @@ The popup list only shows: everything `in_progress` or `interrupted`, plus
 - **`canResume` is the gate, not the error string.** Some servers won't honor
   range requests (`SERVER_NO_RANGE`) → `canResume` is false → we can't help;
   the curl fallback with a fresh URL is the answer there.
+- **`declarativeNetRequest` cannot redirect a `resume()` request.** Confirmed
+  empirically (Playwright + a local test server, redirect rule with all 15
+  `ResourceType` values listed): a control `fetch()` to the same URL got
+  redirected correctly, but `chrome.downloads.resume()`'s own request still
+  hit the server unredirected every time. So there is no way to hand Chrome a
+  fresh URL and have it keep writing an existing partial file — "fresh-URL
+  resume" is only achievable as a full restart from byte 0 (see the Restart
+  action in the popup). Don't re-attempt this approach without new evidence of
+  a Chrome API change.
 
 ## Known limitations
 
@@ -207,9 +231,11 @@ The popup list only shows: everything `in_progress` or `interrupted`, plus
   download already in flight at install time won't have backfilled history.
 - Bulk Clear only affects the rows currently visible in the popup (recent /
   active), not the user's entire download history.
-- Token-expiry case (signed URLs that expire mid-download) isn't handled — if a
-  URL's token expires, resume may fail even though `canResume` was true. A
-  future feature could re-fetch a fresh URL. See TODOs.
+- Token-expiry case (signed URLs that expire mid-download): resume may fail
+  even though `canResume` was true. There's no way to preserve the partial
+  file here (see the `declarativeNetRequest` gotcha above) — the **Restart
+  with new URL** action in an interrupted row's detail panel is the recovery
+  path, and it restarts from byte 0 under the pasted URL.
 
 ## Dev workflow
 
@@ -252,10 +278,6 @@ python3 -c "import json; json.load(open('manifest.json'))"
 
 ## TODOs / ideas (not yet implemented)
 
-- **Fresh-URL resume** for expiring signed URLs: when a resume fails on a
-  tokenized URL, re-fetch the page/API to get a new link and continue.
-- **Start-a-managed-download** box: paste a URL, call
-  `chrome.downloads.download()` (leave filename unset to keep the server name).
 - **Confirm dialog** on "Clear all" if it would remove many rows.
 - Consider `chrome.storage.session` for `samples`-like ephemeral data if any
   moves to the worker.

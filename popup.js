@@ -6,6 +6,8 @@ const els = {
   maxRetryDelaySec: document.getElementById("maxRetryDelaySec"),
   maxRetries: document.getElementById("maxRetries"),
   notify: document.getElementById("notify"),
+  newUrl: document.getElementById("newUrl"),
+  startDownload: document.getElementById("startDownload"),
   list: document.getElementById("list"),
   cancelAll: document.getElementById("cancelAll"),
   clearAll: document.getElementById("clearAll"),
@@ -216,6 +218,7 @@ function renderDetail(item, speed, log) {
         <div class="stat"><span class="k">Retries</span><span class="v ${retries ? "warn" : ""}">${retries}</span></div>
       </div>
       ${running ? `<div class="spark-wrap">${spark || `<div class="spark-empty">Gathering speed data…</div>`}</div>` : ""}
+      ${item.state === "interrupted" ? renderRestart(id) : ""}
       <div class="events-label-row">
         <span class="events-label">History</span>
         <button class="copylog" data-id="${id}">Copy log</button>
@@ -224,10 +227,22 @@ function renderDetail(item, speed, log) {
     </div>`;
 }
 
+function renderRestart(id) {
+  return `
+    <div class="restart-row">
+      <input type="url" class="restart-input" data-id="${id}" placeholder="Restart from a fresh URL…" />
+      <button class="restart-btn" data-id="${id}">Restart</button>
+    </div>`;
+}
+
 const CHEVRON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`;
 
 // ---------- main render ----------
 async function renderList() {
+  // Rebuilding #list's innerHTML mid-keystroke would blow away focus and the
+  // in-progress text, so skip this tick entirely while a restart URL is being typed.
+  if (document.activeElement && document.activeElement.classList.contains("restart-input")) return;
+
   const [{ eventLog }, items] = await Promise.all([
     chrome.storage.local.get("eventLog"),
     chrome.downloads.search({ orderBy: ["-startTime"], limit: 25 }),
@@ -310,6 +325,25 @@ async function clearDownload(id) {
   await purgeStorageFor(String(id));
 }
 
+function startDownload(url) {
+  return new Promise((res) => {
+    chrome.downloads.download({ url }, (id) => {
+      const err = chrome.runtime.lastError;
+      res({ ok: !err && id != null, error: err && err.message });
+    });
+  });
+}
+
+// Chrome's own resume() can't be redirected to a fresh URL and keep the partial
+// file (confirmed empirically — declarativeNetRequest doesn't see resume()'s
+// request), so "restart" here means a full re-download under the new URL,
+// with the old dead entry cleared out from under it.
+async function restartWithNewUrl(oldId, url) {
+  const result = await startDownload(url);
+  if (result.ok) await clearDownload(oldId);
+  return result;
+}
+
 // Row buttons via delegation (survives the 1s re-render).
 els.list.addEventListener("click", async (e) => {
   const copyBtn = e.target.closest(".copylog");
@@ -328,6 +362,26 @@ els.list.addEventListener("click", async (e) => {
     setTimeout(() => { copyBtn.textContent = "Copy log"; }, 1200);
     return;
   }
+  const restartBtn = e.target.closest(".restart-btn");
+  if (restartBtn) {
+    const id = restartBtn.dataset.id;
+    const input = els.list.querySelector(`.restart-input[data-id="${id}"]`);
+    const url = input ? input.value.trim() : "";
+    if (!url) { if (input) input.focus(); return; }
+    restartBtn.disabled = true;
+    restartBtn.textContent = "Restarting…";
+    const result = await restartWithNewUrl(id, url);
+    if (!result.ok) {
+      // .restart-input lives inside #list, so renderList() would immediately
+      // rebuild it and wipe any feedback set here — leave the row as-is
+      // (button re-enabled, URL still typed) so the user can retry.
+      restartBtn.disabled = false;
+      restartBtn.textContent = "Restart";
+      return;
+    }
+    renderList();
+    return;
+  }
   const act = e.target.closest(".act");
   if (act) {
     const id = act.dataset.id;
@@ -342,6 +396,31 @@ els.list.addEventListener("click", async (e) => {
   if (expanded.has(id)) expanded.delete(id); else expanded.add(id);
   renderList();
 });
+els.list.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !e.target.classList.contains("restart-input")) return;
+  e.preventDefault();
+  e.target.closest(".restart-row").querySelector(".restart-btn").click();
+});
+
+// Managed download box — paste a URL, start it as a normal chrome.downloads
+// item (filename left unset so it keeps whatever name the server provides).
+async function submitNewDownload() {
+  const url = els.newUrl.value.trim();
+  if (!url) { els.newUrl.focus(); return; }
+  els.startDownload.disabled = true;
+  const result = await startDownload(url);
+  els.startDownload.disabled = false;
+  if (!result.ok) {
+    els.newUrl.value = "";
+    els.newUrl.placeholder = "Couldn't start — check the URL";
+    return;
+  }
+  els.newUrl.value = "";
+  els.newUrl.placeholder = "Paste a URL to download…";
+  renderList();
+}
+els.startDownload.addEventListener("click", submitNewDownload);
+els.newUrl.addEventListener("keydown", (e) => { if (e.key === "Enter") submitNewDownload(); });
 
 // Bulk actions — operate on exactly the rows currently in view.
 els.cancelAll.addEventListener("click", async () => {
