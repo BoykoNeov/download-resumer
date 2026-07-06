@@ -88,10 +88,11 @@ Three keys:
 
 ```jsonc
 // "config"
-{ "enabled": true, "maxRetries": 1000, "retryDelaySec": 5, "notify": true }
+{ "enabled": true, "maxRetries": 1000, "retryDelaySec": 5, "maxRetryDelaySec": 300, "notify": true }
 
 // "retryState" — keyed by download id (string)
-{ "<id>": { "count": <consecutive stalled failures>, "lastBytes": <number> } }
+{ "<id>": { "count": <consecutive stalled failures>, "lastBytes": <number>,
+            "nextAt": <epochMs a scheduled resume is due>, "pending": <bool> } }
 
 // "eventLog" — keyed by download id (string), each an array capped at 120
 { "<id>": [ { "t": <epochMs>, "type": "<type>", "error"?, "bytes"?, "attempt"? } ] }
@@ -123,9 +124,26 @@ interrupted handler and from the sweep alarm. It:
    resets `count` to 0. This is deliberate — a download that keeps inching
    forward through many drops should retry indefinitely; the `maxRetries` cap
    only counts *consecutive stalls with no progress*.
-4. If `count >= maxRetries` → logs `gave_up`, notifies, stops.
-5. Otherwise increments `count`, logs `retry`, and schedules
-   `chrome.downloads.resume(id)` after `retryDelaySec`.
+4. **Idempotent scheduling:** if `pending` is true and `Date.now() < nextAt`, a
+   resume is already scheduled and not yet due — bail without touching
+   `count` or state. This is what stops the 1/min sweep from re-triggering a
+   resume every cycle regardless of the backoff delay (the earlier duplicate-
+   resume bug). `nextAt`/`pending` are cleared on recovery (`onChanged` →
+   `in_progress`), so a genuinely new hiccup after a brief recovery is never
+   blocked by a stale schedule.
+5. If `count >= maxRetries` → logs `gave_up`, notifies, stops.
+6. Otherwise increments `count`, sets `pending`/`nextAt`, logs `retry`, and
+   schedules `chrome.downloads.resume(id)` after an exponential delay:
+   `retryDelaySec * 2^(count-1)`, capped at `maxRetryDelaySec`, ± 20% jitter
+   (so several downloads dropped by the same network hiccup don't all resume
+   in the same instant, and a long-stalled download doesn't end up waiting
+   absurdly long between tries).
+
+All `retryState` reads+writes (from `handleInterruption`, `onCreated`,
+`clearRetry`, and recovery) are serialized through a single promise chain
+(`retryChain`, mirroring `writeChain` for the event log) — otherwise two
+downloads dropping at the same instant would read-modify-write the shared
+`retryState` map concurrently and lose each other's `pending`/`nextAt`.
 
 Event logging split: the `hiccup` event is logged once per transition in the
 `onChanged` listener (not inside `handleInterruption`), so the sweep re-calling
@@ -231,7 +249,6 @@ python3 -c "import json; json.load(open('manifest.json'))"
   tokenized URL, re-fetch the page/API to get a new link and continue.
 - **Start-a-managed-download** box: paste a URL, call
   `chrome.downloads.download()` (leave filename unset to keep the server name).
-- **Exponential backoff** option (currently a flat `retryDelaySec`).
 - **Confirm dialog** on "Clear all" if it would remove many rows.
 - Consider `chrome.storage.session` for `samples`-like ephemeral data if any
   moves to the worker.

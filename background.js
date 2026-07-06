@@ -8,11 +8,12 @@
 const DEFAULTS = {
   enabled: true,
   maxRetries: 1000,        // consecutive stalled failures before giving up
-  retryDelaySec: 5,        // wait between resume attempts
+  retryDelaySec: 5,        // base delay before the first resume attempt
+  maxRetryDelaySec: 300,   // cap for the exponential backoff below
   notify: true,
 };
 
-const RETRY_KEY = "retryState";   // { [id]: { count, lastBytes } }
+const RETRY_KEY = "retryState";   // { [id]: { count, lastBytes, nextAt, pending } }
 const EVENT_KEY = "eventLog";     // { [id]: [ { t, type, error?, bytes?, attempt? } ] }
 const MAX_EVENTS = 120;           // per download
 const SWEEP_ALARM = "resume-sweep";
@@ -29,9 +30,34 @@ async function getRetryState() {
 async function setRetryState(state) {
   await chrome.storage.local.set({ [RETRY_KEY]: state });
 }
-async function clearRetry(id) {
-  const state = await getRetryState();
-  if (state[id]) { delete state[id]; await setRetryState(state); }
+
+// All retryState reads+writes go through this one chain so concurrent
+// handleInterruption() calls for different ids (e.g. a flaky connection
+// dropping several downloads at once) can't lost-update each other's
+// pending/nextAt via a stale read of the shared map.
+let retryChain = Promise.resolve();
+function mutateRetryState(fn) {
+  const p = retryChain.then(async () => {
+    const state = await getRetryState();
+    const result = await fn(state);
+    await setRetryState(state);
+    return result;
+  });
+  retryChain = p.catch(() => {});
+  return p;
+}
+
+function clearRetry(id) {
+  return mutateRetryState((state) => { delete state[id]; });
+}
+
+// Clears the pending/nextAt schedule once a download is actually moving
+// again, so a stale "already scheduled" guard can't block its next hiccup.
+function markResumed(id) {
+  return mutateRetryState((state) => {
+    const entry = state[id];
+    if (entry) { entry.pending = false; entry.nextAt = 0; }
+  });
 }
 
 // ---------- event log (serialized writes to avoid clobbering) ----------
@@ -113,39 +139,63 @@ async function handleInterruption(id) {
     return;
   }
 
-  const state = await getRetryState();
-  const entry = state[id] || { count: 0, lastBytes: 0 };
+  const outcome = await mutateRetryState((state) => {
+    const entry = state[id] || { count: 0, lastBytes: 0, nextAt: 0, pending: false };
 
-  // If bytes advanced since last attempt, we're making progress through the
-  // drops — reset the counter so we keep going indefinitely.
-  if (item.bytesReceived > entry.lastBytes) {
-    entry.count = 0;
-    entry.lastBytes = item.bytesReceived;
-  }
+    // A resume is already scheduled and not yet due — leave it alone. This is
+    // what stops the 1/min sweep from re-triggering a resume every cycle
+    // regardless of the backoff delay (and the duplicate-resume calls that
+    // caused).
+    if (entry.pending && Date.now() < entry.nextAt) {
+      state[id] = entry;
+      return { action: "wait" };
+    }
 
-  if (entry.count >= cfg.maxRetries) {
+    // If bytes advanced since last attempt, we're making progress through the
+    // drops — reset the counter so we keep going indefinitely.
+    if (item.bytesReceived > entry.lastBytes) {
+      entry.count = 0;
+      entry.lastBytes = item.bytesReceived;
+    }
+
+    if (entry.count >= cfg.maxRetries) {
+      delete state[id];
+      return { action: "gave_up" };
+    }
+
+    entry.count += 1;
+    // Exponential backoff: doubles per consecutive stalled attempt, capped so
+    // a long-stalled download doesn't end up waiting absurdly long between
+    // tries. ±20% jitter on top so a connection drop that takes out several
+    // downloads at once doesn't resume them all in the same instant.
+    const uncappedMs = Math.max(1, cfg.retryDelaySec) * 1000 * Math.pow(2, entry.count - 1);
+    const baseDelayMs = Math.min(uncappedMs, Math.max(1, cfg.maxRetryDelaySec) * 1000);
+    const jitterMs = Math.floor(baseDelayMs * 0.2 * (Math.random() * 2 - 1));
+    const delayMs = Math.max(1000, baseDelayMs + jitterMs);
+    entry.pending = true;
+    entry.nextAt = Date.now() + delayMs;
+    state[id] = entry;
+    return { action: "retry", attempt: entry.count, delayMs };
+  });
+
+  if (outcome.action === "wait") return;
+
+  if (outcome.action === "gave_up") {
     appendEvent(id, { type: "gave_up", bytes: item.bytesReceived });
     notify(id, "Gave up", `${baseName(item)} failed ${cfg.maxRetries} times with no progress.`);
-    await clearRetry(id);
     return;
   }
 
-  entry.count += 1;
-  state[id] = entry;
-  await setRetryState(state);
-  appendEvent(id, { type: "retry", attempt: entry.count, bytes: item.bytesReceived });
-
-  const delayMs = Math.max(1, cfg.retryDelaySec) * 1000;
+  appendEvent(id, { type: "retry", attempt: outcome.attempt, bytes: item.bytesReceived });
   setTimeout(() => {
     chrome.downloads.resume(id, () => { void chrome.runtime.lastError; });
-  }, delayMs);
+  }, outcome.delayMs);
 }
 
 // ---------- listeners ----------
 chrome.downloads.onCreated.addListener((item) => {
-  getRetryState().then((state) => {
-    state[item.id] = { count: 0, lastBytes: item.bytesReceived || 0 };
-    setRetryState(state);
+  mutateRetryState((state) => {
+    state[item.id] = { count: 0, lastBytes: item.bytesReceived || 0, nextAt: 0, pending: false };
   });
   appendEvent(item.id, { type: "created", bytes: item.bytesReceived || 0 });
 });
@@ -170,6 +220,7 @@ chrome.downloads.onChanged.addListener((delta) => {
     chrome.downloads.search({ id: delta.id }, (r) => {
       const it = r && r[0];
       appendRecovered(delta.id, it ? it.bytesReceived : 0);
+      markResumed(delta.id);
     });
   } else if (s === "complete") {
     clearRetry(delta.id);

@@ -1,8 +1,9 @@
-const DEFAULTS = { enabled: true, maxRetries: 1000, retryDelaySec: 5, notify: true };
+const DEFAULTS = { enabled: true, maxRetries: 1000, retryDelaySec: 5, maxRetryDelaySec: 300, notify: true };
 
 const els = {
   enabled: document.getElementById("enabled"),
   retryDelaySec: document.getElementById("retryDelaySec"),
+  maxRetryDelaySec: document.getElementById("maxRetryDelaySec"),
   maxRetries: document.getElementById("maxRetries"),
   notify: document.getElementById("notify"),
   list: document.getElementById("list"),
@@ -60,6 +61,7 @@ async function loadConfig() {
   const cfg = { ...DEFAULTS, ...(config || {}) };
   els.enabled.checked = cfg.enabled;
   els.retryDelaySec.value = cfg.retryDelaySec;
+  els.maxRetryDelaySec.value = cfg.maxRetryDelaySec;
   els.maxRetries.value = cfg.maxRetries;
   els.notify.checked = cfg.notify;
 }
@@ -67,12 +69,13 @@ async function saveConfig() {
   const cfg = {
     enabled: els.enabled.checked,
     retryDelaySec: Math.max(1, parseInt(els.retryDelaySec.value, 10) || DEFAULTS.retryDelaySec),
+    maxRetryDelaySec: Math.max(1, parseInt(els.maxRetryDelaySec.value, 10) || DEFAULTS.maxRetryDelaySec),
     maxRetries: Math.max(1, parseInt(els.maxRetries.value, 10) || DEFAULTS.maxRetries),
     notify: els.notify.checked,
   };
   await chrome.storage.local.set({ config: cfg });
 }
-for (const el of [els.enabled, els.retryDelaySec, els.maxRetries, els.notify]) {
+for (const el of [els.enabled, els.retryDelaySec, els.maxRetryDelaySec, els.maxRetries, els.notify]) {
   el.addEventListener("change", saveConfig);
 }
 
