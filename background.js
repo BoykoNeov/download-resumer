@@ -92,6 +92,41 @@ function appendRecovered(id, bytes) {
   }).catch(() => {});
 }
 
+// Seeds a synthetic "created" event, backdated to the download's own
+// startTime, for any in_progress/interrupted item that has no history at all
+// — e.g. a download already running when the extension was installed, or one
+// that started before a service worker restart. Only ever adds the one
+// "created" event; anything that happened before the extension was watching
+// is unknowable, so it's not fabricated.
+function seedCreatedEvent(id, ev) {
+  writeChain = writeChain.then(async () => {
+    const store = await chrome.storage.local.get(EVENT_KEY);
+    const log = store[EVENT_KEY] || {};
+    if (log[id]) return;
+    log[id] = [ev];
+    await chrome.storage.local.set({ [EVENT_KEY]: log });
+  }).catch(() => {});
+  return writeChain;
+}
+
+async function backfillHistory() {
+  const store = await chrome.storage.local.get(EVENT_KEY);
+  const log = store[EVENT_KEY] || {};
+  const [active, stalled] = await Promise.all([
+    chrome.downloads.search({ state: "in_progress", limit: 0 }),
+    chrome.downloads.search({ state: "interrupted", limit: 0 }),
+  ]);
+  for (const item of [...active, ...stalled]) {
+    const id = String(item.id);
+    if (log[id]) continue;
+    seedCreatedEvent(id, {
+      t: item.startTime ? new Date(item.startTime).getTime() : Date.now(),
+      type: "created",
+      bytes: item.bytesReceived || 0,
+    });
+  }
+}
+
 async function pruneLogs() {
   const store = await chrome.storage.local.get(EVENT_KEY);
   const log = store[EVENT_KEY];
@@ -241,10 +276,13 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     const items = await chrome.downloads.search({ state: "interrupted" });
     for (const item of items) if (item.canResume) handleInterruption(item.id);
   }
+  backfillHistory();
   pruneLogs();
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
   const stored = await chrome.storage.local.get("config");
   if (!stored.config) await chrome.storage.local.set({ config: DEFAULTS });
+  backfillHistory();
 });
+chrome.runtime.onStartup.addListener(backfillHistory);
