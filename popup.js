@@ -219,7 +219,7 @@ function renderDetail(item, speed, log) {
         <div class="stat"><span class="k">Retries</span><span class="v ${retries ? "warn" : ""}">${retries}</span></div>
       </div>
       ${running ? `<div class="spark-wrap">${spark || `<div class="spark-empty">Gathering speed data…</div>`}</div>` : ""}
-      ${item.state === "interrupted" ? renderRestart(id) : ""}
+      ${item.state === "interrupted" ? renderRestart(id, item) : ""}
       <div class="events-label-row">
         <span class="events-label">History</span>
         <button class="copylog" data-id="${id}">Copy log</button>
@@ -228,8 +228,23 @@ function renderDetail(item, speed, log) {
     </div>`;
 }
 
-function renderRestart(id) {
+// Heuristic only: Chrome doesn't tell us a signed URL's token expired, but a
+// 401/403 on a URL carrying the usual signed-URL query params (S3, GCS, Azure
+// SAS, generic ?token=) is the classic shape of that failure. Worded as "may
+// have" — this can also just be a server misconfiguration.
+const AUTH_ERRORS = new Set(["SERVER_FORBIDDEN", "SERVER_UNAUTHORIZED"]);
+const SIGNED_URL_PARAMS = /[?&](?:expires|x-amz-expires|x-amz-signature|x-goog-expires|x-goog-signature|signature|token|policy)=/i;
+
+function looksLikeExpiredUrl(item) {
+  return AUTH_ERRORS.has(item.error) && SIGNED_URL_PARAMS.test(item.url || "");
+}
+
+function renderRestart(id, item) {
+  const hint = looksLikeExpiredUrl(item)
+    ? `<div class="expiry-hint">This link may have expired (${item.error}) — paste a fresh URL below to restart.</div>`
+    : "";
   return `
+    ${hint}
     <div class="restart-row">
       <input type="url" class="restart-input" data-id="${id}" placeholder="Restart from a fresh URL…" />
       <button class="restart-btn" data-id="${id}">Restart</button>
