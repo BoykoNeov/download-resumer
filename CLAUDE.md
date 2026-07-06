@@ -162,6 +162,16 @@ sequences don't clobber each other via read-modify-write races.
 - **Speed** is computed from a rolling window of `{t, bytes}` samples per id
   (`samples`), kept to the last 8 samples (~8s). ETA = remaining / speed, with
   `estimatedEndTime` as a fallback.
+- **Speed sparkline** in the detail panel reads a separate `speedHistory`
+  array per id (last `SPARK_LEN` = 30 samples, ~30s), rendered as an inline
+  SVG polyline. Only shown while the download is actively running; both
+  `samples` and `speedHistory` for an id are dropped the moment it stops being
+  active, so a stalled/finished row doesn't carry stale history into its next
+  run.
+- **Copy log** button in the detail panel dumps that download's `eventLog` (via
+  `buildLogText`) to the clipboard with `navigator.clipboard.writeText`, for
+  pasting into bug reports. Button label flips to "Copied!"/"Copy failed" for
+  ~1.2s as feedback.
 - **Bulk actions are WYSIWYG:** `currentItems` holds exactly the rows currently
   shown, and Cancel all / Clear all operate on that set (running vs. stopped).
   Counts and disabled state come from `updateToolbar()`.
@@ -242,9 +252,6 @@ python3 -c "import json; json.load(open('manifest.json'))"
 
 ## TODOs / ideas (not yet implemented)
 
-- **Copy log** button per download — dump the hiccup timeline as text for bug
-  reports.
-- **Speed sparkline** in the detail panel.
 - **Fresh-URL resume** for expiring signed URLs: when a resume fails on a
   tokenized URL, re-fetch the page/API to get a new link and continue.
 - **Start-a-managed-download** box: paste a URL, call

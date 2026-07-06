@@ -22,6 +22,8 @@ const isRunning = (it) => it.state === "in_progress";
 
 const expanded = new Set();       // ids (as strings) whose detail is open
 const samples = {};               // id -> [{t, bytes}] for speed calc
+const speedHistory = {};          // id -> [bps,...] for the detail sparkline
+const SPARK_LEN = 30;             // ~30s of history at the 1s render interval
 let currentItems = [];            // the rows currently shown, for bulk actions
 
 // ---------- formatting ----------
@@ -83,17 +85,36 @@ for (const el of [els.enabled, els.retryDelaySec, els.maxRetryDelaySec, els.maxR
 function recordSample(item) {
   const id = String(item.id);
   const active = item.state === "in_progress" && !item.paused;
-  if (!active) { delete samples[id]; return 0; }
+  if (!active) { delete samples[id]; delete speedHistory[id]; return 0; }
   const now = Date.now();
   const arr = samples[id] || [];
   arr.push({ t: now, bytes: item.bytesReceived });
   while (arr.length > 8) arr.shift();
   samples[id] = arr;
-  if (arr.length < 2) return 0;
-  const first = arr[0], last = arr[arr.length - 1];
-  const dt = (last.t - first.t) / 1000;
-  const db = last.bytes - first.bytes;
-  return dt > 0 ? db / dt : 0;
+  let speed = 0;
+  if (arr.length >= 2) {
+    const first = arr[0], last = arr[arr.length - 1];
+    const dt = (last.t - first.t) / 1000;
+    const db = last.bytes - first.bytes;
+    speed = dt > 0 ? db / dt : 0;
+  }
+  const hist = speedHistory[id] || [];
+  hist.push(speed);
+  while (hist.length > SPARK_LEN) hist.shift();
+  speedHistory[id] = hist;
+  return speed;
+}
+
+function renderSparkline(id) {
+  const hist = speedHistory[id] || [];
+  if (hist.length < 2) return "";
+  const max = Math.max(...hist, 1);
+  const w = 100, h = 28;
+  const stepX = w / (hist.length - 1);
+  const points = hist
+    .map((v, i) => `${(i * stepX).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`)
+    .join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline points="${points}"/></svg>`;
 }
 
 // ---------- status + events ----------
@@ -141,12 +162,36 @@ function renderEvents(log) {
   return rows.join("");
 }
 
+function buildLogText(item, log) {
+  const lines = [];
+  if (item) {
+    lines.push(baseName(item));
+    if (item.url) lines.push(item.url);
+    lines.push("");
+  }
+  if (!log || log.length === 0) {
+    lines.push("No events yet.");
+  } else {
+    for (const e of log) {
+      const meta = EV[e.type] || { label: e.type };
+      let line = `${new Date(e.t).toISOString()}  ${meta.label}`;
+      if (e.type === "retry" && e.attempt) line += ` #${e.attempt}`;
+      if (e.error) line += `  (${e.error})`;
+      if (typeof e.bytes === "number") line += `  ${fmtBytes(e.bytes)}`;
+      lines.push(line);
+    }
+  }
+  return lines.join("\n");
+}
+
 function renderDetail(item, speed, log) {
+  const id = String(item.id);
   const total = item.totalBytes > 0 ? item.totalBytes : 0;
   const remainingBytes = total ? Math.max(0, total - item.bytesReceived) : 0;
+  const running = item.state === "in_progress" && !item.paused;
 
   let eta = "—";
-  if (item.state === "in_progress" && !item.paused) {
+  if (running) {
     if (speed > 0 && total) eta = fmtDuration(remainingBytes / speed);
     else if (item.estimatedEndTime) {
       eta = fmtDuration((new Date(item.estimatedEndTime).getTime() - Date.now()) / 1000);
@@ -158,17 +203,23 @@ function renderDetail(item, speed, log) {
   const started = (log && log[0]) ? fmtClock(log[0].t)
                 : (item.startTime ? fmtClock(new Date(item.startTime).getTime()) : "—");
 
+  const spark = running ? renderSparkline(id) : "";
+
   return `
     <div class="detail">
       <div class="stats">
-        <div class="stat"><span class="k">Speed</span><span class="v">${item.state === "in_progress" && !item.paused ? fmtSpeed(speed) : "—"}</span></div>
+        <div class="stat"><span class="k">Speed</span><span class="v">${running ? fmtSpeed(speed) : "—"}</span></div>
         <div class="stat"><span class="k">Time left</span><span class="v">${eta}</span></div>
         <div class="stat"><span class="k">Downloaded</span><span class="v">${fmtBytes(item.bytesReceived)}${total ? " / " + fmtBytes(total) : ""}</span></div>
         <div class="stat"><span class="k">Started</span><span class="v">${started}</span></div>
         <div class="stat"><span class="k">Hiccups</span><span class="v ${hiccups ? "warn" : ""}">${hiccups}</span></div>
         <div class="stat"><span class="k">Retries</span><span class="v ${retries ? "warn" : ""}">${retries}</span></div>
       </div>
-      <div class="events-label">History</div>
+      ${running ? `<div class="spark-wrap">${spark || `<div class="spark-empty">Gathering speed data…</div>`}</div>` : ""}
+      <div class="events-label-row">
+        <span class="events-label">History</span>
+        <button class="copylog" data-id="${id}">Copy log</button>
+      </div>
       <div class="events">${renderEvents(log)}</div>
     </div>`;
 }
@@ -255,11 +306,28 @@ async function clearDownload(id) {
   await new Promise((res) => chrome.downloads.erase({ id: Number(id) }, () => { void chrome.runtime.lastError; res(); }));
   expanded.delete(String(id));
   delete samples[String(id)];
+  delete speedHistory[String(id)];
   await purgeStorageFor(String(id));
 }
 
 // Row buttons via delegation (survives the 1s re-render).
 els.list.addEventListener("click", async (e) => {
+  const copyBtn = e.target.closest(".copylog");
+  if (copyBtn) {
+    const id = copyBtn.dataset.id;
+    const item = currentItems.find((it) => String(it.id) === id);
+    const { eventLog } = await chrome.storage.local.get("eventLog");
+    const log = (eventLog || {})[id] || [];
+    const text = buildLogText(item, log);
+    try {
+      await navigator.clipboard.writeText(text);
+      copyBtn.textContent = "Copied!";
+    } catch {
+      copyBtn.textContent = "Copy failed";
+    }
+    setTimeout(() => { copyBtn.textContent = "Copy log"; }, 1200);
+    return;
+  }
   const act = e.target.closest(".act");
   if (act) {
     const id = act.dataset.id;
