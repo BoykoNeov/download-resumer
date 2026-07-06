@@ -1,0 +1,11 @@
+# Packaged build artifact (regenerate with `zip -r download-resumer.zip .`)
+*.zip
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
