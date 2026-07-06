@@ -177,6 +177,12 @@ sequences don't clobber each other via read-modify-write races.
   Counts and disabled state come from `updateToolbar()`. Clear all asks for
   confirmation first if it would remove more than `CLEAR_CONFIRM_THRESHOLD`
   (5) rows, to guard against an accidental bulk wipe.
+- **Clear all history** (settings panel, `#clearHistory`) is deliberately not
+  WYSIWYG: it reaches Chrome's entire download history via
+  `chrome.downloads.search({ limit: 0 })` (the default cap is 1000) and erases
+  every non-running record, not just what's currently listed. Always confirms
+  first, regardless of count — this is the one bulk action that isn't scoped
+  to the visible list, so the blast radius warrants asking every time.
 - Per-row button is contextual: running rows show **Cancel** (stop icon),
   stopped rows show **Clear** (trash icon). Clearing also purges that id's
   `eventLog` / `retryState` entries.
@@ -190,6 +196,12 @@ sequences don't clobber each other via read-modify-write races.
   (see the DNR gotcha below), this is a full re-download under the new URL via
   `startDownload()`, followed by erasing the old dead entry
   (`restartWithNewUrl`) — a restart, not a resume.
+- **Expired-URL hint**: `renderRestart` also calls `looksLikeExpiredUrl(item)`,
+  a heuristic (`SERVER_FORBIDDEN`/`SERVER_UNAUTHORIZED` + a signed-URL-shaped
+  query param like `Signature=`/`X-Amz-Expires=`/`token=`) that shows a hedged
+  "may have expired" banner above the restart input. It's presentation-only —
+  no new storage, no background changes — and worded as a possibility, not a
+  certainty, since Chrome never actually tells us a token expired.
 - Because `.restart-input` lives inside `#list`, the 1s re-render would wipe
   focus and whatever the user just typed mid-keystroke — `renderList()` bails
   out for the tick entirely while `document.activeElement` is a
@@ -229,15 +241,22 @@ The popup list only shows: everything `in_progress` or `interrupted`, plus
 - Resume uses Chrome's own mechanism, so it can't resume what Chrome can't
   (`canResume === false`). No extension can work around a server that refuses
   range requests.
-- History only covers events after the extension was installed/running; a
-  download already in flight at install time won't have backfilled history.
-- Bulk Clear only affects the rows currently visible in the popup (recent /
-  active), not the user's entire download history.
+- History backfill (`backfillHistory` in background.js) only seeds a single
+  `created` event for `in_progress`/`interrupted` items missing a log — it
+  can't fabricate hiccups/retries that happened before the extension was
+  watching, and it doesn't touch old `complete` items (not worth the storage
+  for history the popup never shows anyway).
+- **Clear all history** (see above) erases Chrome's download records; it
+  can't touch files already on disk (same as the per-row Clear).
 - Token-expiry case (signed URLs that expire mid-download): resume may fail
   even though `canResume` was true. There's no way to preserve the partial
   file here (see the `declarativeNetRequest` gotcha above) — the **Restart
   with new URL** action in an interrupted row's detail panel is the recovery
-  path, and it restarts from byte 0 under the pasted URL.
+  path, and it restarts from byte 0 under the pasted URL. The expired-URL
+  hint (see above) is a heuristic nudge toward that action, not proof the
+  token actually expired — it can misfire on a plain 401/403 misconfiguration,
+  and it will miss expiry on servers that don't use recognizable signed-URL
+  query params.
 
 ## Dev workflow
 
