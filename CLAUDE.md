@@ -174,7 +174,9 @@ sequences don't clobber each other via read-modify-write races.
   ~1.2s as feedback.
 - **Bulk actions are WYSIWYG:** `currentItems` holds exactly the rows currently
   shown, and Cancel all / Clear all operate on that set (running vs. stopped).
-  Counts and disabled state come from `updateToolbar()`.
+  Counts and disabled state come from `updateToolbar()`. Clear all asks for
+  confirmation first if it would remove more than `CLEAR_CONFIRM_THRESHOLD`
+  (5) rows, to guard against an accidental bulk wipe.
 - Per-row button is contextual: running rows show **Cancel** (stop icon),
   stopped rows show **Clear** (trash icon). Clearing also purges that id's
   `eventLog` / `retryState` entries.
@@ -278,9 +280,13 @@ python3 -c "import json; json.load(open('manifest.json'))"
 
 ## TODOs / ideas (not yet implemented)
 
-- **Confirm dialog** on "Clear all" if it would remove many rows.
-- Consider `chrome.storage.session` for `samples`-like ephemeral data if any
-  moves to the worker.
+- Investigated: `chrome.storage.session` for `samples`-like ephemeral data.
+  Not applicable today — `samples`/`speedHistory` live only in `popup.js` as
+  module globals, recomputed from scratch each time the popup opens (that's
+  intentional; there's no requirement to survive a popup close). `background.js`
+  has no comparable in-memory ephemeral cache — `retryChain`/`writeChain` are
+  just serialization promise chains, not data. Revisit only if ephemeral
+  per-download state is ever added to the service worker itself.
 
 ## Conventions
 

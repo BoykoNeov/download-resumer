@@ -423,6 +423,8 @@ els.startDownload.addEventListener("click", submitNewDownload);
 els.newUrl.addEventListener("keydown", (e) => { if (e.key === "Enter") submitNewDownload(); });
 
 // Bulk actions — operate on exactly the rows currently in view.
+const CLEAR_CONFIRM_THRESHOLD = 5; // ask before wiping more than this many rows at once
+
 els.cancelAll.addEventListener("click", async () => {
   const running = currentItems.filter(isRunning);
   await Promise.all(running.map((it) => cancelDownload(it.id)));
@@ -430,6 +432,10 @@ els.cancelAll.addEventListener("click", async () => {
 });
 els.clearAll.addEventListener("click", async () => {
   const stopped = currentItems.filter((it) => !isRunning(it));
+  if (stopped.length > CLEAR_CONFIRM_THRESHOLD &&
+      !confirm(`Clear ${stopped.length} downloads from the list?`)) {
+    return;
+  }
   await Promise.all(stopped.map((it) => clearDownload(it.id)));
   renderList();
 });
