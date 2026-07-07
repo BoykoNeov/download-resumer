@@ -15,8 +15,21 @@ const DEFAULTS = {
 
 const RETRY_KEY = "retryState";   // { [id]: { count, lastBytes, nextAt, pending } }
 const EVENT_KEY = "eventLog";     // { [id]: [ { t, type, error?, bytes?, attempt? } ] }
+const SESSION_KEY = "sessionStart"; // epoch ms the current browser session began
 const MAX_EVENTS = 120;           // per download
 const SWEEP_ALARM = "resume-sweep";
+
+// Marks when "this session" (as shown in the popup's list) began. Set on
+// browser startup (force: true — a real new session always resets it) and on
+// install/update only if absent, so a mid-session auto-update doesn't quietly
+// wipe the boundary for someone who's had the browser open for days.
+async function markSessionStart({ force = false } = {}) {
+  if (!force) {
+    const stored = await chrome.storage.local.get(SESSION_KEY);
+    if (stored[SESSION_KEY]) return;
+  }
+  await chrome.storage.local.set({ [SESSION_KEY]: Date.now() });
+}
 
 // ---------- config / retry storage ----------
 async function getConfig() {
@@ -283,6 +296,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 chrome.runtime.onInstalled.addListener(async () => {
   const stored = await chrome.storage.local.get("config");
   if (!stored.config) await chrome.storage.local.set({ config: DEFAULTS });
+  markSessionStart();
   backfillHistory();
 });
-chrome.runtime.onStartup.addListener(backfillHistory);
+chrome.runtime.onStartup.addListener(() => {
+  markSessionStart({ force: true });
+  backfillHistory();
+});

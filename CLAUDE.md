@@ -85,7 +85,7 @@ live only in popup state.
 
 ## Data model (`chrome.storage.local`)
 
-Three keys:
+Four keys:
 
 ```jsonc
 // "config"
@@ -97,6 +97,12 @@ Three keys:
 
 // "eventLog" — keyed by download id (string), each an array capped at 120
 { "<id>": [ { "t": <epochMs>, "type": "<type>", "error"?, "bytes"?, "attempt"? } ] }
+
+// "sessionStart" — epoch ms marking when "this session" (as shown in the
+// popup's list) began. Set by background.js on browser startup (always) and
+// on install/update (only if absent, so a mid-session auto-update doesn't
+// reset it under a running session).
+<epochMs>
 ```
 
 Event `type` values and their meaning:
@@ -232,13 +238,21 @@ sequences don't clobber each other via read-modify-write races.
   `.restart-input`, at the cost of every other row's progress freezing for
   those few seconds.
 
-The popup list shows every `in_progress`, `interrupted`, or `complete` item
-`chrome.downloads.search` returns (limit 50, newest-started first) — no
-time-based decay. Active (`in_progress`) rows are sorted to the top; the rest
-keep search's newest-first order below. A completed or interrupted download
-stays listed until it's cleared, individually or via Clear all — that's
-deliberate, since Clear all history was removed (see the popup rendering
-model section) and Clear all is now the only way to tidy up the list.
+The popup list is scoped to "this session" (since the browser last started —
+see `sessionStart` in the data model above), not Chrome's full download
+history: from the newest 50 items `chrome.downloads.search` returns, it keeps
+every `in_progress` item and every resumable `interrupted` item (`canResume
+=== true`) regardless of start time — background.js may still be retrying one
+that began before this session, e.g. a large download spanning a browser
+restart, and the popup is the only UI that can watch/pause/cancel it. Other
+`interrupted` (dead) and `complete` items are shown only if they started at or
+after `sessionStart`, so old history doesn't clutter the list. Active
+(`in_progress`) rows are sorted to the top; the rest keep search's newest-first
+order below. No further time-based decay once shown — a completed or dead
+download stays listed until it's cleared, individually or via Clear all —
+that's deliberate, since Clear all history was removed (see the popup
+rendering model section) and Clear all is now the only way to tidy up the
+list.
 
 ## MV3 gotchas (read before debugging "it didn't resume")
 

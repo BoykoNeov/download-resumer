@@ -283,20 +283,29 @@ async function renderList() {
   // in-progress text, so skip this tick entirely while a restart URL is being typed.
   if (document.activeElement && document.activeElement.classList.contains("restart-input")) return;
 
-  const [{ eventLog, retryState }, items] = await Promise.all([
-    chrome.storage.local.get(["eventLog", "retryState"]),
+  const [{ eventLog, retryState, sessionStart }, items] = await Promise.all([
+    chrome.storage.local.get(["eventLog", "retryState", "sessionStart"]),
     chrome.downloads.search({ orderBy: ["-startTime"], limit: 50 }),
   ]);
   const logs = eventLog || {};
   const retryStates = retryState || {};
+  const sessionStartMs = sessionStart || 0; // 0 (show all) if not yet written
 
-  // No time-based decay: every active/interrupted/completed download stays
-  // listed until explicitly cleared (individually or via Clear all), bounded
-  // only by the search limit above. Active rows float to the top; everything
-  // else keeps search()'s newest-started-first order.
-  const relevant = items.filter((it) =>
-    it.state === "in_progress" || it.state === "interrupted" || it.state === "complete"
-  );
+  // Active and still-resumable downloads show regardless of when they
+  // started — background.js may still be retrying one that began before this
+  // browser session (e.g. a large download spanning a restart), and hiding it
+  // would cut off the only UI that can pause/cancel/watch it. Completed and
+  // dead (canResume === false) downloads are scoped to "this session" so
+  // Chrome's full history doesn't clutter the list; no further time decay
+  // once shown — they stay until cleared (individually or via Clear all).
+  const relevant = items.filter((it) => {
+    if (it.state === "in_progress") return true;
+    if (it.state === "interrupted" && it.canResume) return true;
+    if (it.state === "interrupted" || it.state === "complete") {
+      return new Date(it.startTime).getTime() >= sessionStartMs;
+    }
+    return false;
+  });
   const active = relevant.filter(isRunning);
   const others = relevant.filter((it) => !isRunning(it));
   const recent = [...active, ...others];
