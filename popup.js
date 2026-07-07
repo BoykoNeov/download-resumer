@@ -13,7 +13,6 @@ const els = {
   clearAll: document.getElementById("clearAll"),
   cancelCount: document.getElementById("cancelCount"),
   clearCount: document.getElementById("clearCount"),
-  clearHistory: document.getElementById("clearHistory"),
 };
 
 const ICON_STOP =
@@ -286,18 +285,21 @@ async function renderList() {
 
   const [{ eventLog, retryState }, items] = await Promise.all([
     chrome.storage.local.get(["eventLog", "retryState"]),
-    chrome.downloads.search({ orderBy: ["-startTime"], limit: 25 }),
+    chrome.downloads.search({ orderBy: ["-startTime"], limit: 50 }),
   ]);
   const logs = eventLog || {};
   const retryStates = retryState || {};
 
-  const recent = items.filter((it) => {
-    if (it.state === "in_progress" || it.state === "interrupted") return true;
-    if (it.state === "complete" && it.endTime) {
-      return Date.now() - new Date(it.endTime).getTime() < 120000;
-    }
-    return false;
-  });
+  // No time-based decay: every active/interrupted/completed download stays
+  // listed until explicitly cleared (individually or via Clear all), bounded
+  // only by the search limit above. Active rows float to the top; everything
+  // else keeps search()'s newest-started-first order.
+  const relevant = items.filter((it) =>
+    it.state === "in_progress" || it.state === "interrupted" || it.state === "complete"
+  );
+  const active = relevant.filter(isRunning);
+  const others = relevant.filter((it) => !isRunning(it));
+  const recent = [...active, ...others];
 
   currentItems = recent;
   updateToolbar();
@@ -500,36 +502,6 @@ els.clearAll.addEventListener("click", async () => {
     return;
   }
   await Promise.all(stopped.map((it) => clearDownload(it.id)));
-  renderList();
-});
-
-// Unlike Clear all (WYSIWYG on currentItems), this reaches Chrome's entire
-// download history — search() defaults to a 1000-item cap, so limit:0 is
-// required to actually get everything.
-els.clearHistory.addEventListener("click", async () => {
-  const all = await chrome.downloads.search({ limit: 0 });
-  const stopped = all.filter((it) => !isRunning(it));
-  if (stopped.length === 0) return;
-  if (!confirm(`Clear all ${stopped.length} downloads from history? Files already saved to disk are not deleted.`)) {
-    return;
-  }
-  els.clearHistory.disabled = true;
-  await Promise.all(stopped.map((it) =>
-    new Promise((res) => chrome.downloads.erase({ id: it.id }, () => { void chrome.runtime.lastError; res(); }))
-  ));
-  const store = await chrome.storage.local.get(["eventLog", "retryState"]);
-  const log = store.eventLog || {};
-  const retry = store.retryState || {};
-  for (const it of stopped) {
-    const id = String(it.id);
-    delete log[id];
-    delete retry[id];
-    expanded.delete(id);
-    delete samples[id];
-    delete speedHistory[id];
-  }
-  await chrome.storage.local.set({ eventLog: log, retryState: retry });
-  els.clearHistory.disabled = false;
   renderList();
 });
 

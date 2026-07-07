@@ -185,20 +185,14 @@ sequences don't clobber each other via read-modify-write races.
   shown, and Cancel all / Clear all operate on that set (running vs. stopped).
   Counts and disabled state come from `updateToolbar()`. Clear all asks for
   confirmation first if it would remove more than `CLEAR_CONFIRM_THRESHOLD`
-  (5) rows, to guard against an accidental bulk wipe.
-- The `#clearHistory` field's `<label>` has no `for` attribute, unlike every
-  other `.field` label in settings. A `<label for="clearHistory">` pointing at
-  a `<button>` would fire a synthetic click on it from anywhere in the label
-  text (button is a labelable element per the HTML spec) — that turned the
-  whole settings row into a hidden "Clear all history" hitbox. Don't add `for`
-  back onto a label that targets a button/other labelable control unless you
-  actually want the whole label clickable.
-- **Clear all history** (settings panel, `#clearHistory`) is deliberately not
-  WYSIWYG: it reaches Chrome's entire download history via
-  `chrome.downloads.search({ limit: 0 })` (the default cap is 1000) and erases
-  every non-running record, not just what's currently listed. Always confirms
-  first, regardless of count — this is the one bulk action that isn't scoped
-  to the visible list, so the blast radius warrants asking every time.
+  (5) rows, to guard against an accidental bulk wipe. Clear all is the *only*
+  bulk-clear action — there used to be a separate "Clear all history" button
+  that reached Chrome's entire download history beyond what the popup
+  displayed; it was removed because the popup doesn't present itself as a
+  history viewer, so clearing history from it was surprising. If a
+  `<label for="X">` is ever added back next to a button in `.settings`, note
+  that a label pointing at a button (a labelable element) fires a synthetic
+  click on it from anywhere in the label text, not just the button itself.
 - Per-row button is contextual: running rows show **Pause/Resume** (toggles on
   `item.paused`) plus **Cancel** (stop icon), stopped rows show **Clear** (trash
   icon). Clearing also purges that id's `eventLog` / `retryState` entries.
@@ -238,8 +232,13 @@ sequences don't clobber each other via read-modify-write races.
   `.restart-input`, at the cost of every other row's progress freezing for
   those few seconds.
 
-The popup list only shows: everything `in_progress` or `interrupted`, plus
-`complete` items finished in the last 2 minutes.
+The popup list shows every `in_progress`, `interrupted`, or `complete` item
+`chrome.downloads.search` returns (limit 50, newest-started first) — no
+time-based decay. Active (`in_progress`) rows are sorted to the top; the rest
+keep search's newest-first order below. A completed or interrupted download
+stays listed until it's cleared, individually or via Clear all — that's
+deliberate, since Clear all history was removed (see the popup rendering
+model section) and Clear all is now the only way to tidy up the list.
 
 ## MV3 gotchas (read before debugging "it didn't resume")
 
@@ -274,10 +273,9 @@ The popup list only shows: everything `in_progress` or `interrupted`, plus
 - History backfill (`backfillHistory` in background.js) only seeds a single
   `created` event for `in_progress`/`interrupted` items missing a log — it
   can't fabricate hiccups/retries that happened before the extension was
-  watching, and it doesn't touch old `complete` items (not worth the storage
-  for history the popup never shows anyway).
-- **Clear all history** (see above) erases Chrome's download records; it
-  can't touch files already on disk (same as the per-row Clear).
+  watching, and it doesn't touch old `complete` items (a completed download's
+  detail panel will show "No events yet" if it finished before the extension
+  ever saw it, even though the popup now lists it).
 - Token-expiry case (signed URLs that expire mid-download): resume may fail
   even though `canResume` was true. There's no way to preserve the partial
   file here (see the `declarativeNetRequest` gotcha above) — the **Restart
