@@ -104,6 +104,8 @@
   .act svg { width: 13px; height: 13px; }
   .act.cancel:hover { background: var(--panel-2); border-color: var(--line); color: var(--wait); }
   .act.clear:hover  { background: var(--panel-2); border-color: var(--line); color: var(--dead); }
+  .act.pause:hover  { background: var(--panel-2); border-color: var(--line); color: var(--wait); }
+  .act.resume:hover { background: var(--panel-2); border-color: var(--line); color: var(--live); }
 
   #list { padding: 0 10px 6px; max-height: 260px; overflow-y: auto; }
   .empty {
@@ -181,6 +183,14 @@
     border-radius: 6px; padding: 3px 8px; cursor: pointer; transition: all .15s;
   }
   .copylog:hover { color: var(--ink); border-color: #33465a; }
+
+  .file-actions { display: flex; gap: 8px; margin-top: 10px; }
+  .filebtn {
+    flex: 1 1 auto; font-family: var(--sans); font-size: 11px; font-weight: 600;
+    color: var(--ink-dim); background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 8px; cursor: pointer; text-align: center; transition: all .15s;
+  }
+  .filebtn:hover { color: var(--accent); border-color: var(--accent); }
 
   .spark-wrap { margin-top: 10px; }
   .spark { width: 100%; height: 28px; display: block; }
@@ -270,7 +280,7 @@
       Show a notification when a download finishes or fails
     </label>
     <div class="field">
-      <label for="clearHistory">Entire download history (not just the list above)</label>
+      <label>Entire download history (not just the list above)</label>
       <button class="tbtn danger" id="clearHistory">Clear all history</button>
     </div>
   </div>

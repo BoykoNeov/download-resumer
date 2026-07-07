@@ -5,6 +5,7 @@
   "description": "Automatically resumes interrupted downloads instead of restarting them from zero. Keeps the original filename.",
   "permissions": [
     "downloads",
+    "downloads.open",
     "storage",
     "alarms",
     "notifications"

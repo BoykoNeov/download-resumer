@@ -7,7 +7,8 @@ Guidance for working on this repo with Claude Code.
 **Download Resumer** — a Manifest V3 Chrome extension that automatically resumes
 interrupted downloads instead of letting them restart from zero, and shows a
 live per-download panel (speed, ETA, and a timestamped hiccup/retry timeline).
-It also lets you cancel running downloads and clear stopped ones, individually
+It also lets you pause/resume or cancel running downloads and clear stopped ones,
+individually
 or in bulk.
 
 The original problem it solves: large downloads (~10 GB) over flaky connections
@@ -37,7 +38,7 @@ download and toggle your network off/on, or use DevTools Network throttling.
 ## File structure
 
 ```
-manifest.json     MV3 manifest. Permissions: downloads, storage, alarms, notifications.
+manifest.json     MV3 manifest. Permissions: downloads, downloads.open, storage, alarms, notifications.
 background.js     Service worker. All resume logic + event logging live here.
 popup.html        Popup markup + all CSS (inline <style>). ~360px wide.
 popup.js          Popup rendering, live stats, and the cancel/clear actions.
@@ -168,6 +169,14 @@ sequences don't clobber each other via read-modify-write races.
   `samples` and `speedHistory` for an id are dropped the moment it stops being
   active, so a stalled/finished row doesn't carry stale history into its next
   run.
+- **Next retry countdown**: the detail panel's stats grid reads `retryState`
+  (fetched alongside `eventLog` in `renderList`) and, while an interrupted item
+  has a pending scheduled resume, shows a live "Next retry" stat counting down
+  to `retryState[id].nextAt`. This is the *actual* backed-off delay for that
+  specific download (which grows with each consecutive stalled attempt), not
+  the "Wait between retries" setting — that setting is the shared base delay
+  across all downloads, so it deliberately isn't overwritten to reflect any
+  one download's current backoff.
 - **Copy log** button in the detail panel dumps that download's `eventLog` (via
   `buildLogText`) to the clipboard with `navigator.clipboard.writeText`, for
   pasting into bug reports. Button label flips to "Copied!"/"Copy failed" for
@@ -177,15 +186,36 @@ sequences don't clobber each other via read-modify-write races.
   Counts and disabled state come from `updateToolbar()`. Clear all asks for
   confirmation first if it would remove more than `CLEAR_CONFIRM_THRESHOLD`
   (5) rows, to guard against an accidental bulk wipe.
+- The `#clearHistory` field's `<label>` has no `for` attribute, unlike every
+  other `.field` label in settings. A `<label for="clearHistory">` pointing at
+  a `<button>` would fire a synthetic click on it from anywhere in the label
+  text (button is a labelable element per the HTML spec) — that turned the
+  whole settings row into a hidden "Clear all history" hitbox. Don't add `for`
+  back onto a label that targets a button/other labelable control unless you
+  actually want the whole label clickable.
 - **Clear all history** (settings panel, `#clearHistory`) is deliberately not
   WYSIWYG: it reaches Chrome's entire download history via
   `chrome.downloads.search({ limit: 0 })` (the default cap is 1000) and erases
   every non-running record, not just what's currently listed. Always confirms
   first, regardless of count — this is the one bulk action that isn't scoped
   to the visible list, so the blast radius warrants asking every time.
-- Per-row button is contextual: running rows show **Cancel** (stop icon),
-  stopped rows show **Clear** (trash icon). Clearing also purges that id's
-  `eventLog` / `retryState` entries.
+- Per-row button is contextual: running rows show **Pause/Resume** (toggles on
+  `item.paused`) plus **Cancel** (stop icon), stopped rows show **Clear** (trash
+  icon). Clearing also purges that id's `eventLog` / `retryState` entries.
+- **Pause/Resume** (`pauseDownload`/`resumeDownload`) call
+  `chrome.downloads.pause`/`resume` directly and are orthogonal to the
+  auto-resume logic in `background.js`: pausing keeps `state === "in_progress"`
+  and only flips `paused`, so `onChanged`'s `if (!delta.state) return;` guard
+  means it never touches `retryState`/the interrupted-handling path.
+  `chrome.downloads.resume()` is the same call background.js uses to resume an
+  interrupted download — Chrome overloads it for both "continue a paused
+  download" and "continue an interrupted one."
+- **Open file / Show in folder**: a `complete` row's detail panel
+  (`renderFileActions`) gets two buttons calling `chrome.downloads.open(id)` /
+  `.show(id)`. `open()` requires the `downloads.open` manifest permission (on
+  top of `downloads`) and must run synchronously off the click — no `await`
+  before it — since Chrome requires an active user gesture and throws outside
+  one.
 - **Managed download box** (`#newUrl` / `#startDownload`, above the list): paste
   a URL and it calls `chrome.downloads.download({ url })` directly — filename
   is left unset so it keeps whatever name the server provides. Lives outside

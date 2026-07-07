@@ -20,6 +20,10 @@ const ICON_STOP =
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>`;
 const ICON_TRASH =
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>`;
+const ICON_PAUSE =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>`;
+const ICON_PLAY =
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 5v14l12-7z"/></svg>`;
 
 const isRunning = (it) => it.state === "in_progress";
 
@@ -187,7 +191,7 @@ function buildLogText(item, log) {
   return lines.join("\n");
 }
 
-function renderDetail(item, speed, log) {
+function renderDetail(item, speed, log, retryEntry) {
   const id = String(item.id);
   const total = item.totalBytes > 0 ? item.totalBytes : 0;
   const remainingBytes = total ? Math.max(0, total - item.bytesReceived) : 0;
@@ -206,6 +210,17 @@ function renderDetail(item, speed, log) {
   const started = (log && log[0]) ? fmtClock(log[0].t)
                 : (item.startTime ? fmtClock(new Date(item.startTime).getTime()) : "—");
 
+  // Live countdown to the next scheduled resume, from background.js's
+  // exponential-backoff schedule (retryState.nextAt). Shown so the growing
+  // wait between attempts is actually visible, rather than only reflected in
+  // the "Wait between retries" setting (which is the base delay, not the
+  // current backed-off one, and is shared across all downloads).
+  let nextRetry = null;
+  if (item.state === "interrupted" && item.canResume && retryEntry && retryEntry.pending && retryEntry.nextAt) {
+    const secsLeft = Math.round((retryEntry.nextAt - Date.now()) / 1000);
+    nextRetry = secsLeft > 0 ? `${secsLeft}s` : "any moment";
+  }
+
   const spark = running ? renderSparkline(id) : "";
 
   return `
@@ -217,8 +232,10 @@ function renderDetail(item, speed, log) {
         <div class="stat"><span class="k">Started</span><span class="v">${started}</span></div>
         <div class="stat"><span class="k">Hiccups</span><span class="v ${hiccups ? "warn" : ""}">${hiccups}</span></div>
         <div class="stat"><span class="k">Retries</span><span class="v ${retries ? "warn" : ""}">${retries}</span></div>
+        ${nextRetry ? `<div class="stat"><span class="k">Next retry</span><span class="v warn">${nextRetry}</span></div>` : ""}
       </div>
       ${running ? `<div class="spark-wrap">${spark || `<div class="spark-empty">Gathering speed data…</div>`}</div>` : ""}
+      ${item.state === "complete" ? renderFileActions(id) : ""}
       ${item.state === "interrupted" ? renderRestart(id, item) : ""}
       <div class="events-label-row">
         <span class="events-label">History</span>
@@ -237,6 +254,14 @@ const SIGNED_URL_PARAMS = /[?&](?:expires|x-amz-expires|x-amz-signature|x-goog-e
 
 function looksLikeExpiredUrl(item) {
   return AUTH_ERRORS.has(item.error) && SIGNED_URL_PARAMS.test(item.url || "");
+}
+
+function renderFileActions(id) {
+  return `
+    <div class="file-actions">
+      <button class="filebtn" data-act="open-file" data-id="${id}">Open file</button>
+      <button class="filebtn" data-act="show-folder" data-id="${id}">Show in folder</button>
+    </div>`;
 }
 
 function renderRestart(id, item) {
@@ -259,11 +284,12 @@ async function renderList() {
   // in-progress text, so skip this tick entirely while a restart URL is being typed.
   if (document.activeElement && document.activeElement.classList.contains("restart-input")) return;
 
-  const [{ eventLog }, items] = await Promise.all([
-    chrome.storage.local.get("eventLog"),
+  const [{ eventLog, retryState }, items] = await Promise.all([
+    chrome.storage.local.get(["eventLog", "retryState"]),
     chrome.downloads.search({ orderBy: ["-startTime"], limit: 25 }),
   ]);
   const logs = eventLog || {};
+  const retryStates = retryState || {};
 
   const recent = items.filter((it) => {
     if (it.state === "in_progress" || it.state === "interrupted") return true;
@@ -302,7 +328,8 @@ async function renderList() {
            <span class="fname" title="${baseName(item)}">${baseName(item)}</span>
            ${hiccups ? `<span class="retries">${hiccups}⚡</span>` : ""}
            ${isRunning(item)
-             ? `<button class="act cancel" data-act="cancel" data-id="${id}" title="Cancel download" aria-label="Cancel download">${ICON_STOP}</button>`
+             ? `<button class="act ${item.paused ? "resume" : "pause"}" data-act="${item.paused ? "resume" : "pause"}" data-id="${id}" title="${item.paused ? "Resume download" : "Pause download"}" aria-label="${item.paused ? "Resume download" : "Pause download"}">${item.paused ? ICON_PLAY : ICON_PAUSE}</button>
+               <button class="act cancel" data-act="cancel" data-id="${id}" title="Cancel download" aria-label="Cancel download">${ICON_STOP}</button>`
              : `<button class="act clear" data-act="clear" data-id="${id}" title="Clear from list" aria-label="Clear from list">${ICON_TRASH}</button>`}
            <button class="toggle" data-id="${id}" aria-label="Details" aria-expanded="${open}">${CHEVRON}</button>
          </div>
@@ -311,7 +338,7 @@ async function renderList() {
            <span class="status-text">${st.label}</span>
            <span>${fmtBytes(item.bytesReceived)}${total ? " / " + fmtBytes(total) : ""}</span>
          </div>
-         ${open ? renderDetail(item, speed, log) : ""}
+         ${open ? renderDetail(item, speed, log, retryStates[id]) : ""}
        </div>`
     );
   }
@@ -332,6 +359,15 @@ async function purgeStorageFor(id) {
 
 function cancelDownload(id) {
   return new Promise((res) => chrome.downloads.cancel(Number(id), () => { void chrome.runtime.lastError; res(); }));
+}
+// Manual pause/resume for an actively running download. This is orthogonal to
+// background.js's auto-resume: pausing keeps state "in_progress" (only
+// `paused` flips), so it never touches the interrupted/retryState logic.
+function pauseDownload(id) {
+  return new Promise((res) => chrome.downloads.pause(Number(id), () => { void chrome.runtime.lastError; res(); }));
+}
+function resumeDownload(id) {
+  return new Promise((res) => chrome.downloads.resume(Number(id), () => { void chrome.runtime.lastError; res(); }));
 }
 async function clearDownload(id) {
   await new Promise((res) => chrome.downloads.erase({ id: Number(id) }, () => { void chrome.runtime.lastError; res(); }));
@@ -362,6 +398,15 @@ async function restartWithNewUrl(oldId, url) {
 
 // Row buttons via delegation (survives the 1s re-render).
 els.list.addEventListener("click", async (e) => {
+  const fileBtn = e.target.closest(".filebtn");
+  if (fileBtn) {
+    // Must fire synchronously off the click (no prior await) — chrome.downloads.open()
+    // requires an active user gesture and throws outside one.
+    const id = Number(fileBtn.dataset.id);
+    if (fileBtn.dataset.act === "open-file") chrome.downloads.open(id);
+    else chrome.downloads.show(id);
+    return;
+  }
   const copyBtn = e.target.closest(".copylog");
   if (copyBtn) {
     const id = copyBtn.dataset.id;
@@ -402,6 +447,8 @@ els.list.addEventListener("click", async (e) => {
   if (act) {
     const id = act.dataset.id;
     if (act.dataset.act === "cancel") await cancelDownload(id);
+    else if (act.dataset.act === "pause") await pauseDownload(id);
+    else if (act.dataset.act === "resume") await resumeDownload(id);
     else await clearDownload(id);
     renderList();
     return;
